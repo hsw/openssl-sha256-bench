@@ -38,6 +38,13 @@ make            # picks up /opt/homebrew/opt/openssl@3 on macOS, system headers 
 ./bench-sha256 5000000
 ```
 
+Both `Makefile` and `Dockerfile` default to `-O3 -march=native` so the
+benchmark's own loop and helper code compile for the host's full ISA.
+This makes binaries non-portable between hosts with different CPUs —
+always rebuild on the machine you plan to measure on. Override with
+`CFLAGS=-O2` or `--build-arg EXTRA_CFLAGS="-O2"` if you specifically
+want a generic build.
+
 ### Docker, one specific version
 
 ```sh
@@ -94,18 +101,24 @@ Without SHA-NI (e.g. pre-Ice Lake Xeons, most laptops through 2019)
 absolute numbers are 3-5× slower but relative ordering between APIs
 holds. See the **Caveats** section below.
 
+Compiled with `-O3 -march=native`; rebuilding with `-O2` and no
+`-march` yields numbers within ±1% — the hot path is entirely inside
+`libcrypto.a`'s SHA-NI assembler (selected via OpenSSL's runtime
+`OPENSSL_ia32cap` feature detection), and user-side compile flags have
+no measurable effect.
+
 ### Best of 3 passes (ns / call)
 
 | OpenSSL | (1) SHA256() | (2) Init/Upd/Final | (3) EVP new/free | (3b) EVP reused | (4) EVP_Q_digest |
 |---------|-------------:|-------------------:|-----------------:|----------------:|-----------------:|
-| 3.0.20  |        735.8 |          **282.2** |            718.1 |           692.3 |            735.2 |
-| 3.1.8   |        589.0 |          **283.7** |            575.7 |           552.0 |            587.0 |
-| 3.2.6   |        595.2 |          **283.7** |            581.1 |           551.7 |            594.8 |
-| 3.3.7   |        599.6 |          **283.7** |            584.0 |           558.2 |            597.9 |
-| 3.4.5   |        625.8 |          **284.6** |            606.6 |           584.2 |            625.4 |
-| 3.5.6   |        614.0 |          **286.2** |            598.0 |           590.4 |            613.0 |
-| 3.6.2   |        623.5 |          **285.9** |            601.8 |           581.2 |            622.0 |
-| 4.0.0   |        572.8 |            283.5   |            542.7 |       **516.0** |            570.0 |
+| 3.0.20  |        732.4 |          **284.5** |            713.5 |           690.4 |            729.7 |
+| 3.1.8   |        588.9 |          **284.0** |            575.0 |           553.2 |            588.0 |
+| 3.2.6   |        603.2 |          **285.5** |            586.7 |           577.3 |            611.9 |
+| 3.3.7   |        600.3 |          **284.0** |            581.6 |           563.4 |            598.4 |
+| 3.4.5   |        623.5 |          **285.5** |            607.7 |           584.6 |            624.6 |
+| 3.5.6   |        613.9 |          **287.0** |            599.6 |           586.7 |            615.3 |
+| 3.6.2   |        622.7 |          **286.9** |            600.0 |           576.4 |            616.3 |
+| 4.0.0   |        558.1 |            286.3   |            542.8 |       **520.2** |            558.3 |
 
 ### Overhead vs fastest row (%)
 

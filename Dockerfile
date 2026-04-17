@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ARG OPENSSL_VERSION
+# -march=native builds against the host CPU. Image is therefore not portable
+# between hosts with different ISAs; rebuild wherever you plan to run it.
+ARG EXTRA_CFLAGS="-march=native -O3"
 
 WORKDIR /src
 RUN git clone --depth 1 --branch openssl-${OPENSSL_VERSION} \
@@ -16,11 +19,11 @@ RUN ./config --prefix=/opt/openssl no-shared no-tests \
     && make install_sw
 
 COPY bench-sha256.c /src/
-RUN cc -O2 -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED -DBENCH_STATIC_LINK \
+RUN cc -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED -DBENCH_STATIC_LINK ${EXTRA_CFLAGS} \
         -I/opt/openssl/include /src/bench-sha256.c \
         /opt/openssl/lib64/libcrypto.a 2>/dev/null \
         -lpthread -ldl -o /usr/local/bin/bench-sha256 \
-    || cc -O2 -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED -DBENCH_STATIC_LINK \
+    || cc -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED -DBENCH_STATIC_LINK ${EXTRA_CFLAGS} \
         -I/opt/openssl/include /src/bench-sha256.c \
         /opt/openssl/lib/libcrypto.a \
         -lpthread -ldl -o /usr/local/bin/bench-sha256
