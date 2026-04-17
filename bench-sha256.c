@@ -10,9 +10,16 @@
  *                                               current incremental
  *   (3b) same as (3) but EVP_MD_CTX_reset instead of new/free per call
  *                                               current incremental, reused ctx
- *   (3c) same as (3b) but with EVP_MD_CTX_FLAG_ONESHOT set before each Init
- *                                               (no-op in 1.1+, see README)
+ *   (3d) same as (3b) but the EVP_MD is fetched once via EVP_MD_fetch()
+ *                                               and re-used — skips the
+ *                                               implicit fetch that
+ *                                               EVP_sha256() triggers inside
+ *                                               every EVP_DigestInit_ex [3.0+]
  *   (4)  EVP_Q_digest                           current one-shot      [3.0+]
+ *
+ * Not tested: EVP_MD_CTX_FLAG_ONESHOT. Setting it before Init was honored
+ * by 1.0.2 cryptodev / openbsd_hw engines but is not read by any SHA-256
+ * provider in 1.1.1 / 3.x / 4.0. Measurably no-op on every version we run.
  *
  * Build: make
  * Run:   ./bench-sha256              (defaults to 5M iterations per pass)
@@ -65,6 +72,9 @@ wall_ns(void)
 static const unsigned char *g_msg;
 static unsigned char         g_md[32];
 static EVP_MD_CTX           *g_reuse_ctx;  /* for (3b) */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static EVP_MD               *g_fetched_md; /* for (3d) */
+#endif
 
 static void
 api_sha256_oneshot(void)
@@ -107,22 +117,21 @@ api_evp_reused(void)
     EVP_DigestFinal_ex(g_reuse_ctx, g_md, &n);
 }
 
-/* (3c) reused ctx + EVP_MD_CTX_FLAG_ONESHOT. Originally consumed by the
- * 1.0.2 cryptodev/openbsd_hw engines to skip buffering input across
- * multiple Update() calls. The flag is still exposed on modern OpenSSL
- * but is read nowhere on the SHA-256 path since 1.1.1 — see README. */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+/* (3d) reused ctx + pre-fetched EVP_MD. EVP_sha256() returns a legacy
+ * EVP_MD whose type->prov == NULL; EVP_DigestInit_ex then silently calls
+ * EVP_MD_fetch("sha256", ...) on every call (see crypto/evp/digest.c in
+ * evp_md_init_internal). Passing a fetched MD avoids that per-call fetch. */
 static void
-api_evp_reused_oneshot(void)
+api_evp_prefetched(void)
 {
     unsigned int n;
     EVP_MD_CTX_reset(g_reuse_ctx);
-    EVP_MD_CTX_set_flags(g_reuse_ctx, EVP_MD_CTX_FLAG_ONESHOT);
-    EVP_DigestInit_ex(g_reuse_ctx, EVP_sha256(), NULL);
+    EVP_DigestInit_ex(g_reuse_ctx, g_fetched_md, NULL);
     EVP_DigestUpdate(g_reuse_ctx, g_msg, INPUT_LEN);
     EVP_DigestFinal_ex(g_reuse_ctx, g_md, &n);
 }
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static void
 api_evp_q_digest(void)
 {
@@ -206,6 +215,11 @@ main(int argc, char **argv)
     g_reuse_ctx = EVP_MD_CTX_new();
     XNOTNULL(g_reuse_ctx);
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    g_fetched_md = EVP_MD_fetch(NULL, "SHA256", NULL);
+    XNOTNULL(g_fetched_md);
+#endif
+
     printf("Compiled against: %s (0x%08lx)\n",
            OPENSSL_VERSION_TEXT, (unsigned long)OPENSSL_VERSION_NUMBER);
     printf("Linked at runtime: %s\n", OpenSSL_version(OPENSSL_VERSION));
@@ -239,9 +253,12 @@ main(int argc, char **argv)
     double best_3b = min3_of_pass_12(passes);
     print_row("(3b) EVP_MD_CTX reused (reset)", passes, ok, best_3b);
 
-    time_api(api_evp_reused_oneshot, iters, ref, &ok, passes);
-    double best_3c = min3_of_pass_12(passes);
-    print_row("(3c) EVP_MD_CTX reused + FLAG_ONESHOT", passes, ok, best_3c);
+    double best_3d = -1.0;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    time_api(api_evp_prefetched, iters, ref, &ok, passes);
+    best_3d = min3_of_pass_12(passes);
+    print_row("(3d) reused + pre-fetched EVP_MD", passes, ok, best_3d);
+#endif
 
     double best_4 = -1.0;
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -257,17 +274,20 @@ main(int argc, char **argv)
     if (best_2  < fastest) fastest = best_2;
     if (best_3  < fastest) fastest = best_3;
     if (best_3b < fastest) fastest = best_3b;
-    if (best_3c < fastest) fastest = best_3c;
-    if (best_4 > 0 && best_4 < fastest) fastest = best_4;
+    if (best_3d > 0 && best_3d < fastest) fastest = best_3d;
+    if (best_4  > 0 && best_4  < fastest) fastest = best_4;
 
     printf("\nBest vs fastest (%.1f ns):\n", fastest);
     printf("  (1)  %+6.1f%%\n", 100.0 * (best_1 / fastest - 1.0));
     printf("  (2)  %+6.1f%%\n", 100.0 * (best_2 / fastest - 1.0));
     printf("  (3)  %+6.1f%%\n", 100.0 * (best_3 / fastest - 1.0));
     printf("  (3b) %+6.1f%%\n", 100.0 * (best_3b / fastest - 1.0));
-    printf("  (3c) %+6.1f%%\n", 100.0 * (best_3c / fastest - 1.0));
-    if (best_4 > 0) printf("  (4)  %+6.1f%%\n", 100.0 * (best_4 / fastest - 1.0));
+    if (best_3d > 0) printf("  (3d) %+6.1f%%\n", 100.0 * (best_3d / fastest - 1.0));
+    if (best_4  > 0) printf("  (4)  %+6.1f%%\n", 100.0 * (best_4  / fastest - 1.0));
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    EVP_MD_free(g_fetched_md);
+#endif
     EVP_MD_CTX_free(g_reuse_ctx);
     return 0;
 }

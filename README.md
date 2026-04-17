@@ -21,14 +21,19 @@ embeds OpenSSL via `./auto/configure --with-openssl=`.
 
 ## APIs tested
 
-| #    | API                                                              | Deprecated? |
-|------|------------------------------------------------------------------|-------------|
-| (1)  | `SHA256(msg, len, md)` one-shot                                  | 3.0+        |
-| (2)  | `SHA256_Init` + `SHA256_Update` + `SHA256_Final`                 | 3.0+        |
-| (3)  | `EVP_MD_CTX_new` + `EVP_DigestInit_ex` + `_Update` + `_Final_ex` + `EVP_MD_CTX_free` | no |
-| (3b) | same as (3) but `EVP_MD_CTX_reset` instead of `_new` / `_free` per call | no    |
-| (3c) | (3b) + `EVP_MD_CTX_set_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)` before each `Init` | no |
-| (4)  | `EVP_Q_digest`                                                   | no (3.0+)   |
+| #    | API                                                                                      | Deprecated? |
+|------|------------------------------------------------------------------------------------------|-------------|
+| (1)  | `SHA256(msg, len, md)` one-shot                                                          | 3.0+        |
+| (2)  | `SHA256_Init` + `SHA256_Update` + `SHA256_Final`                                         | 3.0+        |
+| (3)  | `EVP_MD_CTX_new` + `EVP_DigestInit_ex` + `_Update` + `_Final_ex` + `EVP_MD_CTX_free`     | no          |
+| (3b) | same as (3) but `EVP_MD_CTX_reset` instead of `_new` / `_free` per call                  | no          |
+| (3d) | (3b) + the `EVP_MD` is `EVP_MD_fetch`ed **once** and reused across calls (skips the implicit fetch `EVP_DigestInit_ex` triggers when given a legacy `EVP_sha256()` descriptor) | no (3.0+) |
+| (4)  | `EVP_Q_digest`                                                                           | no (3.0+)   |
+
+Not tested: `EVP_MD_CTX_FLAG_ONESHOT`. Setting it before `Init` was
+honored by the 1.0.2 `cryptodev` and `openbsd_hw` engines but is read
+nowhere on the SHA-256 path in 1.1.1 / 3.x / 4.0 (verified via
+`grep FLAG_ONESHOT` across each release). Measurably no-op everywhere.
 
 ## Build & run
 
@@ -100,13 +105,19 @@ The dispatcher generated from `crypto/sha/asm/sha512-x86_64.pl` runs a
 CPUID check at the first call and picks the fastest available path.
 Priorities from fastest to slowest:
 
-| #   | Path                        | CPUID check                                   | First x86 CPU                                    | Instructions used                              | Since OpenSSL |
-|-----|-----------------------------|-----------------------------------------------|--------------------------------------------------|------------------------------------------------|--------------:|
-| 1   | **SHA-NI (SHA extensions)** | CPUID[7].EBX bit 29                           | Goldmont Plus (2017), Ice Lake-SP server (2021)  | `sha256rnds2`, `sha256msg1`, `sha256msg2`      | 1.0.2 (2015) |
-| 2   | AVX2 + BMI1 + BMI2          | CPUID[7].EBX bits 3 + 5 + 8                   | Haswell (2013)                                   | 256-bit `vpshufd` / `vpxor` + `shrx` / `shlx`  | 1.0.2 (2015) |
-| 3   | AVX + SSSE3 (Intel only)    | CPUID[1].ECX bit 28 + bit 9, vendor = Intel   | Sandy Bridge (2011)                              | 128-bit `vpshufb` on xmm                       | 1.0.1 (2012) |
-| 4   | SSSE3                       | CPUID[1].ECX bit 9                            | Nehalem (2008), Barcelona (AMD, 2007)            | 128-bit `pshufb`                               | 1.0.0 (2010) |
-| 5   | Scalar x86_64               | — (always available)                          | AMD Opteron (2003)                               | plain integer `ror`, `and`, `xor`, `add`       | 0.9.8 (2005) |
+| #   | Path                        | First x86 CPU                                    | Instructions used                              | Since OpenSSL | Speedup vs next path |
+|-----|-----------------------------|--------------------------------------------------|------------------------------------------------|--------------:|---------------------:|
+| 1   | **SHA-NI (SHA extensions)** | Goldmont Plus (2017), Ice Lake-SP server (2021)  | `sha256rnds2`, `sha256msg1`, `sha256msg2`      | 1.0.2 (2015)  | **×3.04** |
+| 2   | AVX2 + BMI1 + BMI2          | Haswell (2013)                                   | 256-bit `vpshufd` / `vpxor` + `shrx` / `shlx`  | 1.0.2 (2015)  | ×1.08 |
+| 3   | AVX + SSSE3 (Intel only)    | Sandy Bridge (2011)                              | 128-bit `vpshufb` on xmm                       | 1.0.1 (2012)  | ×1.02 |
+| 4   | SSSE3                       | Nehalem (2008), Barcelona (AMD, 2007)            | 128-bit `pshufb`                               | 1.0.0 (2010)  | ×1.13 |
+| 5   | Scalar x86_64               | AMD Opteron (2003)                               | plain integer `ror`, `and`, `xor`, `add`       | 0.9.8 (2005)  | — (baseline) |
+
+Speedup column measured on this CPU (Xeon Gold 5318Y) with the (2)
+legacy incremental API, against the same OpenSSL binary but with
+`OPENSSL_ia32cap` set to peel off one ISA flag at a time from the top.
+Asm timings are identical on 3.5.6 and 4.0.0 within measurement noise —
+the dispatch picks the same path, only the wrapper layer above differs.
 
 All five paths are present in every OpenSSL version this benchmark
 covers (3.0.20 → 4.0.0). Since `sha_ni` is in this CPU's feature list
@@ -114,6 +125,12 @@ above, path **(1)** is what the bench actually exercises —
 `sha256_block_data_order_shaext` in the generated `sha512-x86_64.s`,
 a tight loop of `sha256rnds2` + `sha256msg1` + `sha256msg2` + `paddd`
 on xmm0–xmm15.
+
+SHA-NI is the only major step; the rest (AVX2 vs AVX vs SSSE3 vs
+scalar) cluster within 15% of each other on 200-byte input. If your
+target hardware lacks SHA-NI, expect all API columns in the main table
+above to shift up by ~2.5-3×; the relative ordering between APIs is
+unchanged.
 
 OpenSSL does **not** have an AVX-512 single-buffer SHA-256 path — on
 one message SHA-NI is already faster than any plausible AVX-512 code
@@ -137,29 +154,29 @@ no measurable effect.
 
 ### Best of 3 passes (ns / call)
 
-| OpenSSL | (1) SHA256() | (2) Init/Upd/Final | (3) EVP new/free | (3b) EVP reused | (3c) reused + FLAG_ONESHOT | (4) EVP_Q_digest |
-|---------|-------------:|-------------------:|-----------------:|----------------:|---------------------------:|-----------------:|
-| 3.0.20  |        729.7 |          **282.2** |            711.5 |           690.9 |                      692.0 |            727.8 |
-| 3.1.8   |        576.4 |          **282.3** |            562.6 |           536.9 |                      541.1 |            575.6 |
-| 3.2.6   |        606.2 |          **284.9** |            584.0 |           563.0 |                      563.6 |            608.0 |
-| 3.3.7   |        590.5 |          **283.0** |            578.0 |           556.0 |                      557.1 |            590.0 |
-| 3.4.5   |        622.5 |          **284.3** |            606.4 |           581.8 |                      584.7 |            620.4 |
-| 3.5.6   |        616.0 |          **283.2** |            594.3 |           570.9 |                      574.6 |            615.0 |
-| 3.6.2   |        618.6 |          **286.3** |            596.9 |           574.5 |                      575.6 |            619.9 |
-| 4.0.0   |        562.9 |            286.5   |            545.2 |       **521.6** |                      523.7 |            562.1 |
+| OpenSSL | (1) SHA256() | (2) Init/Upd/Final | (3) EVP new/free | (3b) EVP reused | (3d) pre-fetched | (4) EVP_Q_digest |
+|---------|-------------:|-------------------:|-----------------:|----------------:|-----------------:|-----------------:|
+| 3.0.20  |        744.4 |          **287.6** |            727.8 |           703.4 |            386.1 |            742.8 |
+| 3.1.8   |        578.4 |          **283.7** |            563.2 |           538.6 |            371.0 |            577.5 |
+| 3.2.6   |        589.0 |          **282.3** |            575.2 |           549.2 |            379.5 |            589.5 |
+| 3.3.7   |        593.7 |          **282.7** |            576.5 |           554.2 |            372.7 |            592.1 |
+| 3.4.5   |        620.5 |          **284.8** |            606.1 |           583.3 |            376.4 |            618.2 |
+| 3.5.6   |        615.3 |          **283.9** |            595.2 |           572.8 |            377.3 |            613.4 |
+| 3.6.2   |        619.6 |          **283.5** |            596.5 |           575.4 |            383.7 |            618.3 |
+| 4.0.0   |        562.2 |          **285.5** |            545.3 |           523.5 |            373.7 |            561.1 |
 
 ### Overhead vs fastest row (%)
 
-| OpenSSL | (1) | (2)  | (3)    | (3b)   | (3c)   | (4)    |
-|---------|----:|-----:|-------:|-------:|-------:|-------:|
-| 3.0.20  | +158.6% | baseline | +152.1% | +144.8% | +145.3% | +157.9% |
-| 3.1.8   | +104.2% | baseline |  +99.3% |  +90.2% |  +91.7% | +103.9% |
-| 3.2.6   | +112.7% | baseline | +105.0% |  +97.6% |  +97.8% | +113.4% |
-| 3.3.7   | +108.7% | baseline | +104.2% |  +96.5% |  +96.9% | +108.5% |
-| 3.4.5   | +119.0% | baseline | +113.3% | +104.7% | +105.7% | +118.2% |
-| 3.5.6   | +117.5% | baseline | +109.9% | +101.6% | +102.9% | +117.2% |
-| 3.6.2   | +116.1% | baseline | +108.5% | +100.6% | +101.0% | +116.5% |
-| 4.0.0   |  +96.5% | baseline |  +90.6% |  +82.1% |  +82.8% |  +96.2% |
+| OpenSSL | (1)    | (2)      | (3)    | (3b)   | (3d)  | (4)    |
+|---------|-------:|---------:|-------:|-------:|------:|-------:|
+| 3.0.20  | +158.8% | baseline | +153.1% | +144.6% | +34.3% | +158.3% |
+| 3.1.8   | +103.9% | baseline |  +98.5% |  +89.8% | +30.8% | +103.5% |
+| 3.2.6   | +108.6% | baseline | +103.7% |  +94.5% | +34.4% | +108.8% |
+| 3.3.7   | +110.0% | baseline | +103.9% |  +96.0% | +31.8% | +109.4% |
+| 3.4.5   | +117.9% | baseline | +112.8% | +104.8% | +32.2% | +117.1% |
+| 3.5.6   | +116.7% | baseline | +109.6% | +101.8% | +32.9% | +116.1% |
+| 3.6.2   | +118.6% | baseline | +110.4% | +102.9% | +35.3% | +118.1% |
+| 4.0.0   |  +97.0% | baseline |  +91.0% |  +83.4% | +30.9% |  +96.5% |
 
 ## Findings
 
@@ -195,24 +212,15 @@ no measurable effect.
 6. **Correctness:** 6 APIs × 8 versions = 48/48 identical digests
    against the EVP reference.
 
-7. **`EVP_MD_CTX_FLAG_ONESHOT` does not affect SHA-256 on 1.1.x / 3.x /
-   4.0.** It was originally honored by the cryptodev and openbsd_hw
-   engines (`crypto/engine/eng_cryptodev.c`,
-   `crypto/evp/openbsd_hw.c` in 1.0.2): if set, the engine skipped
-   buffering the input in `state->mac_data` and sent it directly to the
-   kernel / hardware in one ioctl. Both engines were removed / stopped
-   being built by default after 1.0.2. From 1.1.1 onward the flag is
-   still *set* by `EVP_Digest()` (`crypto/evp/digest.c:625` in 3.0, :556
-   in 4.0) but never *read* by anything in the SHA-256 path — neither
-   the EVP layer, nor the default/legacy providers'
-   `sha2_prov.c` digest implementation. The only remaining reader in
-   3.0+ is HMAC's provider, which consumes it via
-   `OSSL_MAC_PARAM_DIGEST_ONESHOT` — a separate code path that does not
-   fire for direct `EVP_DigestUpdate` on a raw SHA-256 context. The
-   `(3c)` column in the table above reflects this — setting the flag
-   costs +0.1…+0.8% (measurement noise plus the extra
-   `EVP_MD_CTX_set_flags` call itself), with no speedup on any tested
-   version.
+7. **`EVP_sha256()` silently triggers `EVP_MD_fetch` on every
+   `EVP_DigestInit_ex`.** `EVP_sha256()` returns a legacy `EVP_MD`
+   descriptor with `type->prov == NULL`. Inside `evp_md_init_internal`
+   (`crypto/evp/digest.c`) this causes an implicit
+   `EVP_MD_fetch(NULL, "sha256", "")` on every init. Passing a
+   pre-fetched MD from `EVP_MD_fetch` directly (column (3d)) skips
+   that fetch and cuts per-call time by 150-320 ns vs (3b) on modern
+   hardware — the single largest EVP optimisation available without
+   changing the API.
 
 ## Why the floor is ~283 ns
 
