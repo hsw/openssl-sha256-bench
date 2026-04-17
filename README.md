@@ -89,18 +89,45 @@ Measured on **Intel Xeon Gold 5318Y** (Ice Lake-SP, Q2 2021,
 base 2.10 GHz / turbo 3.40 GHz), Linux 6.8, Ubuntu 24.04 inside Docker,
 gcc 13.3.0. Single-threaded.
 
-Relevant ISA features present (from `/proc/cpuinfo`):
-- **`sha_ni`** — Intel SHA Extensions (hardware SHA-1/SHA-256 rounds).
-  OpenSSL's SHA-NI asm path is engaged on all tested versions.
-- **`avx`, `avx2`, `avx512f`, `avx512bw`, `avx512dq`, `avx512vl`,
-  `avx512vbmi`, `avx512vnni`** — full AVX-512 suite. Not used by the
-  SHA-NI codepath itself, but relevant for vectorized multi-buffer
-  SHA impls that OpenSSL may switch to on longer inputs.
-- **`aes`, `bmi1`, `bmi2`** — unrelated but typical for this class.
+ISA features on this CPU (from `/proc/cpuinfo`): `aes`, `avx`, `avx2`,
+`avx512bw`, `avx512cd`, `avx512dq`, `avx512f`, `avx512ifma`, `avx512vbmi`,
+`avx512vbmi2`, `avx512vl`, `avx512vnni`, `avx512vpopcntdq`, `bmi1`, `bmi2`,
+`sha_ni`, `sse4_1`, `sse4_2`.
 
-Without SHA-NI (e.g. pre-Ice Lake Xeons, most laptops through 2019)
-absolute numbers are 3-5× slower but relative ordering between APIs
-holds. See the **Caveats** section below.
+### How OpenSSL picks a SHA-256 implementation on x86_64
+
+The dispatcher generated from `crypto/sha/asm/sha512-x86_64.pl` runs a
+CPUID check at the first call and picks the fastest available path.
+Priorities from fastest to slowest:
+
+| #   | Path                        | CPUID check                                   | First x86 CPU                                    | Instructions used                              | Since OpenSSL |
+|-----|-----------------------------|-----------------------------------------------|--------------------------------------------------|------------------------------------------------|--------------:|
+| 1   | **SHA-NI (SHA extensions)** | CPUID[7].EBX bit 29                           | Goldmont Plus (2017), Ice Lake-SP server (2021)  | `sha256rnds2`, `sha256msg1`, `sha256msg2`      | 1.0.2 (2015) |
+| 2   | AVX2 + BMI1 + BMI2          | CPUID[7].EBX bits 3 + 5 + 8                   | Haswell (2013)                                   | 256-bit `vpshufd` / `vpxor` + `shrx` / `shlx`  | 1.0.2 (2015) |
+| 3   | AVX + SSSE3 (Intel only)    | CPUID[1].ECX bit 28 + bit 9, vendor = Intel   | Sandy Bridge (2011)                              | 128-bit `vpshufb` on xmm                       | 1.0.1 (2012) |
+| 4   | SSSE3                       | CPUID[1].ECX bit 9                            | Nehalem (2008), Barcelona (AMD, 2007)            | 128-bit `pshufb`                               | 1.0.0 (2010) |
+| 5   | Scalar x86_64               | — (always available)                          | AMD Opteron (2003)                               | plain integer `ror`, `and`, `xor`, `add`       | 0.9.8 (2005) |
+
+All five paths are present in every OpenSSL version this benchmark
+covers (3.0.20 → 4.0.0). Since `sha_ni` is in this CPU's feature list
+above, path **(1)** is what the bench actually exercises —
+`sha256_block_data_order_shaext` in the generated `sha512-x86_64.s`,
+a tight loop of `sha256rnds2` + `sha256msg1` + `sha256msg2` + `paddd`
+on xmm0–xmm15.
+
+OpenSSL does **not** have an AVX-512 single-buffer SHA-256 path — on
+one message SHA-NI is already faster than any plausible AVX-512 code
+would be. The separate file `crypto/sha/asm/sha256-mb-x86_64.pl` uses
+AVX2 / AVX-512 but exclusively for multi-buffer parallel hashing
+(N independent streams at once), which is not what any `SHA256()`-like
+one-shot API exercises. Hashing one ClientHello at a time, as nginx
+fingerprint modules do, never hits that path.
+
+Without SHA-NI (pre-2017 Atom, pre-2021 Xeon, most laptops through
+2019) the absolute numbers are 3-5× slower but the relative ordering
+between the API columns is unchanged.
+
+### Compile flags
 
 Compiled with `-O3 -march=native`; rebuilding with `-O2` and no
 `-march` yields numbers within ±1% — the hot path is entirely inside
