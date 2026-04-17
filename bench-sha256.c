@@ -10,6 +10,8 @@
  *                                               current incremental
  *   (3b) same as (3) but EVP_MD_CTX_reset instead of new/free per call
  *                                               current incremental, reused ctx
+ *   (3c) same as (3b) but with EVP_MD_CTX_FLAG_ONESHOT set before each Init
+ *                                               (no-op in 1.1+, see README)
  *   (4)  EVP_Q_digest                           current one-shot      [3.0+]
  *
  * Build: make
@@ -100,6 +102,21 @@ api_evp_reused(void)
 {
     unsigned int n;
     EVP_MD_CTX_reset(g_reuse_ctx);
+    EVP_DigestInit_ex(g_reuse_ctx, EVP_sha256(), NULL);
+    EVP_DigestUpdate(g_reuse_ctx, g_msg, INPUT_LEN);
+    EVP_DigestFinal_ex(g_reuse_ctx, g_md, &n);
+}
+
+/* (3c) reused ctx + EVP_MD_CTX_FLAG_ONESHOT. Originally consumed by the
+ * 1.0.2 cryptodev/openbsd_hw engines to skip buffering input across
+ * multiple Update() calls. The flag is still exposed on modern OpenSSL
+ * but is read nowhere on the SHA-256 path since 1.1.1 — see README. */
+static void
+api_evp_reused_oneshot(void)
+{
+    unsigned int n;
+    EVP_MD_CTX_reset(g_reuse_ctx);
+    EVP_MD_CTX_set_flags(g_reuse_ctx, EVP_MD_CTX_FLAG_ONESHOT);
     EVP_DigestInit_ex(g_reuse_ctx, EVP_sha256(), NULL);
     EVP_DigestUpdate(g_reuse_ctx, g_msg, INPUT_LEN);
     EVP_DigestFinal_ex(g_reuse_ctx, g_md, &n);
@@ -222,6 +239,10 @@ main(int argc, char **argv)
     double best_3b = min3_of_pass_12(passes);
     print_row("(3b) EVP_MD_CTX reused (reset)", passes, ok, best_3b);
 
+    time_api(api_evp_reused_oneshot, iters, ref, &ok, passes);
+    double best_3c = min3_of_pass_12(passes);
+    print_row("(3c) EVP_MD_CTX reused + FLAG_ONESHOT", passes, ok, best_3c);
+
     double best_4 = -1.0;
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     time_api(api_evp_q_digest, iters, ref, &ok, passes);
@@ -236,6 +257,7 @@ main(int argc, char **argv)
     if (best_2  < fastest) fastest = best_2;
     if (best_3  < fastest) fastest = best_3;
     if (best_3b < fastest) fastest = best_3b;
+    if (best_3c < fastest) fastest = best_3c;
     if (best_4 > 0 && best_4 < fastest) fastest = best_4;
 
     printf("\nBest vs fastest (%.1f ns):\n", fastest);
@@ -243,6 +265,7 @@ main(int argc, char **argv)
     printf("  (2)  %+6.1f%%\n", 100.0 * (best_2 / fastest - 1.0));
     printf("  (3)  %+6.1f%%\n", 100.0 * (best_3 / fastest - 1.0));
     printf("  (3b) %+6.1f%%\n", 100.0 * (best_3b / fastest - 1.0));
+    printf("  (3c) %+6.1f%%\n", 100.0 * (best_3c / fastest - 1.0));
     if (best_4 > 0) printf("  (4)  %+6.1f%%\n", 100.0 * (best_4 / fastest - 1.0));
 
     EVP_MD_CTX_free(g_reuse_ctx);
