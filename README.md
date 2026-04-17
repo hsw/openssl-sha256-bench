@@ -56,14 +56,6 @@ Matrix covered by `docker-bake.hcl`: `3.0.20`, `3.1.8`, `3.2.6`, `3.3.7`,
 `3.4.5`, `3.5.6`, `3.6.2`, `4.0.0` (latest patch release of each minor
 at the time of writing).
 
-### Remote host via SSH
-
-```sh
-rsync -av . user@host:/home/user/work/openssl-sha256-bench/
-ssh user@host 'cd /home/user/work/openssl-sha256-bench && ./run-bench.sh'
-rsync -av user@host:/home/user/work/openssl-sha256-bench/results/ ./results/
-```
-
 ## How the benchmark works
 
 Each API runs in three passes of `N` iterations (default `N = 5 000 000`):
@@ -85,8 +77,22 @@ produces the wrong hash.
 
 ## Results
 
-Measured on **AMD EPYC-class x86_64, 96 cores, Linux 6.8**
-(Ubuntu 24.04 inside Docker, single-threaded run).
+Measured on **2 × Intel Xeon Gold 5318Y** (Ice Lake-SP, Q2 2021,
+24C/48T per socket, base 2.10 GHz / turbo 3.40 GHz), 96 logical cores,
+Linux 6.8 (Ubuntu 24.04 inside Docker, single-threaded run).
+
+Relevant ISA features present (from `/proc/cpuinfo`):
+- **`sha_ni`** — Intel SHA Extensions (hardware SHA-1/SHA-256 rounds).
+  OpenSSL's SHA-NI asm path is engaged on all tested versions.
+- **`avx`, `avx2`, `avx512f`, `avx512bw`, `avx512dq`, `avx512vl`,
+  `avx512vbmi`, `avx512vnni`** — full AVX-512 suite. Not used by the
+  SHA-NI codepath itself, but relevant for vectorized multi-buffer
+  SHA impls that OpenSSL may switch to on longer inputs.
+- **`aes`, `bmi1`, `bmi2`** — unrelated but typical for this class.
+
+Without SHA-NI (e.g. pre-Ice Lake Xeons, most laptops through 2019)
+absolute numbers are 3-5× slower but relative ordering between APIs
+holds. See the **Caveats** section below.
 
 ### Best of 3 passes (ns / call)
 

@@ -16,11 +16,11 @@ RUN ./config --prefix=/opt/openssl no-shared no-tests \
     && make install_sw
 
 COPY bench-sha256.c /src/
-RUN cc -O2 -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED \
+RUN cc -O2 -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED -DBENCH_STATIC_LINK \
         -I/opt/openssl/include /src/bench-sha256.c \
         /opt/openssl/lib64/libcrypto.a 2>/dev/null \
         -lpthread -ldl -o /usr/local/bin/bench-sha256 \
-    || cc -O2 -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED \
+    || cc -O2 -Wall -Wextra -DOPENSSL_SUPPRESS_DEPRECATED -DBENCH_STATIC_LINK \
         -I/opt/openssl/include /src/bench-sha256.c \
         /opt/openssl/lib/libcrypto.a \
         -lpthread -ldl -o /usr/local/bin/bench-sha256

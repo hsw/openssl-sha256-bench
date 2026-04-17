@@ -33,6 +33,23 @@
 #define INPUT_LEN 200
 #define PASSES    3
 
+/* Abort on OpenSSL failure — cheap, eliminates M1 from audit. */
+#define XCHK(expr) do {                                           \
+    if ((expr) != 1) {                                            \
+        fprintf(stderr, "OpenSSL call failed at %s:%d: " #expr "\n", \
+                __FILE__, __LINE__);                              \
+        abort();                                                  \
+    }                                                             \
+} while (0)
+
+#define XNOTNULL(p) do {                                          \
+    if ((p) == NULL) {                                            \
+        fprintf(stderr, "NULL from %s at %s:%d\n",                \
+                #p, __FILE__, __LINE__);                          \
+        abort();                                                  \
+    }                                                             \
+} while (0)
+
 static double
 wall_ns(void)
 {
@@ -62,6 +79,11 @@ api_sha256_incremental(void)
     SHA256_Final(g_md, &ctx);
 }
 
+/*
+ * Hot-path API wrappers — no return-value checks on purpose. Adding branches
+ * here would measure "API + error-check" instead of "API alone". The reference
+ * digest comparison at the end of time_api() catches any silent corruption.
+ */
 static void
 api_evp_new_free(void)
 {
@@ -97,8 +119,7 @@ api_evp_q_digest(void)
 typedef void (*api_fn)(void);
 
 static void
-time_api(const char *label, api_fn fn, size_t iters,
-         const unsigned char *ref, int *digest_ok,
+time_api(api_fn fn, size_t iters, const unsigned char *ref, int *digest_ok,
          double *passes)
 {
     int p;
@@ -113,7 +134,6 @@ time_api(const char *label, api_fn fn, size_t iters,
         passes[p] = (t1 - t0) / (double)iters;
     }
     *digest_ok = (memcmp(g_md, ref, 32) == 0);
-    (void)label;
 }
 
 static void
@@ -136,10 +156,21 @@ min3_of_pass_12(const double *passes)
 int
 main(int argc, char **argv)
 {
-    size_t iters = (argc > 1) ? (size_t)atoll(argv[1]) : 5000000;
+    size_t iters;
     unsigned char msg[INPUT_LEN];
     unsigned char ref[32];
     size_t i;
+
+    if (argc > 1) {
+        long long raw = atoll(argv[1]);
+        if (raw <= 0) {
+            fprintf(stderr, "usage: %s [iterations]  (must be > 0)\n", argv[0]);
+            return 2;
+        }
+        iters = (size_t)raw;
+    } else {
+        iters = 5000000;
+    }
 
     for (i = 0; i < INPUT_LEN; i++) msg[i] = (unsigned char)(i * 31 + 7);
     g_msg = msg;
@@ -148,18 +179,24 @@ main(int argc, char **argv)
     {
         EVP_MD_CTX *ctx = EVP_MD_CTX_new();
         unsigned int n;
-        EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-        EVP_DigestUpdate(ctx, msg, INPUT_LEN);
-        EVP_DigestFinal_ex(ctx, ref, &n);
+        XNOTNULL(ctx);
+        XCHK(EVP_DigestInit_ex(ctx, EVP_sha256(), NULL));
+        XCHK(EVP_DigestUpdate(ctx, msg, INPUT_LEN));
+        XCHK(EVP_DigestFinal_ex(ctx, ref, &n));
         EVP_MD_CTX_free(ctx);
     }
 
     g_reuse_ctx = EVP_MD_CTX_new();
+    XNOTNULL(g_reuse_ctx);
 
     printf("Compiled against: %s (0x%08lx)\n",
            OPENSSL_VERSION_TEXT, (unsigned long)OPENSSL_VERSION_NUMBER);
     printf("Linked at runtime: %s\n", OpenSSL_version(OPENSSL_VERSION));
+#ifdef BENCH_STATIC_LINK
     printf("Linkage:    static (libcrypto.a, same as nginx --with-openssl=)\n");
+#else
+    printf("Linkage:    dynamic (-lcrypto)\n");
+#endif
     printf("input:      %d bytes\n", INPUT_LEN);
     printf("iterations: %zu × %d passes (pass 1 = warmup, report best of passes 2-3)\n",
            iters, PASSES);
@@ -169,25 +206,25 @@ main(int argc, char **argv)
     int ok;
     double passes[PASSES];
 
-    time_api("(1) SHA256() one-shot", api_sha256_oneshot, iters, ref, &ok, passes);
+    time_api(api_sha256_oneshot, iters, ref, &ok, passes);
     double best_1 = min3_of_pass_12(passes);
     print_row("(1) SHA256() one-shot [deprecated]", passes, ok, best_1);
 
-    time_api("(2) SHA256_Init/_Update/_Final", api_sha256_incremental, iters, ref, &ok, passes);
+    time_api(api_sha256_incremental, iters, ref, &ok, passes);
     double best_2 = min3_of_pass_12(passes);
     print_row("(2) SHA256_Init/_Update/_Final [deprecated]", passes, ok, best_2);
 
-    time_api("(3) EVP new/free", api_evp_new_free, iters, ref, &ok, passes);
+    time_api(api_evp_new_free, iters, ref, &ok, passes);
     double best_3 = min3_of_pass_12(passes);
     print_row("(3) EVP_MD_CTX new/free per call", passes, ok, best_3);
 
-    time_api("(3b) EVP reused", api_evp_reused, iters, ref, &ok, passes);
+    time_api(api_evp_reused, iters, ref, &ok, passes);
     double best_3b = min3_of_pass_12(passes);
     print_row("(3b) EVP_MD_CTX reused (reset)", passes, ok, best_3b);
 
     double best_4 = -1.0;
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
-    time_api("(4) EVP_Q_digest", api_evp_q_digest, iters, ref, &ok, passes);
+    time_api(api_evp_q_digest, iters, ref, &ok, passes);
     best_4 = min3_of_pass_12(passes);
     print_row("(4) EVP_Q_digest one-shot [3.0+]", passes, ok, best_4);
 #else

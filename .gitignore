@@ -5,6 +5,7 @@ bench-sha256
 
 # Bench output
 results/
+results-*/
 
 # OS / editor cruft
 .DS_Store
