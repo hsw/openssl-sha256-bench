@@ -189,3 +189,9 @@ Best vs fastest (285.9 ns):
 
 Apache License 2.0 — matching OpenSSL 3.0+'s license. See `LICENSE` and
 `NOTICE`.
+
+## Credits
+
+Developed with assistance from [Claude Opus 4.7 (1M context)](https://www.anthropic.com/claude)
+running inside Claude Code. Benchmark design, implementation, multi-version
+Docker matrix, and initial analysis were pair-programmed with the model.
