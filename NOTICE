@@ -1,0 +1,8 @@
+openssl-sha256-bench
+Copyright 2026 Sergei Khomenkov
+
+Licensed under the Apache License, Version 2.0 — matching the license
+of OpenSSL 3.0+ (https://www.openssl.org/source/license.html).
+
+This product links against OpenSSL (https://www.openssl.org/),
+which is also licensed under the Apache License 2.0.

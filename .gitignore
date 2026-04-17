@@ -1,0 +1,14 @@
+# Build artifacts
+bench-sha256
+*.o
+*.a
+
+# Bench output
+results/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
